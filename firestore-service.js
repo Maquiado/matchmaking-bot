@@ -8,15 +8,27 @@ function init() {
   try {
     if (saPath) {
       const serviceAccount = require(saPath);
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+      }
+      const projectId = serviceAccount.project_id || process.env.FIREBASE_PROJECT_ID;
+      if (projectId && !process.env.GOOGLE_CLOUD_PROJECT) process.env.GOOGLE_CLOUD_PROJECT = projectId;
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount), projectId });
     } else if (saJson) {
       const serviceAccount = JSON.parse(saJson);
-      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      if (serviceAccount.private_key && serviceAccount.private_key.includes('\\n')) {
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, '\n');
+      }
+      const projectId = serviceAccount.project_id || process.env.FIREBASE_PROJECT_ID;
+      if (projectId && !process.env.GOOGLE_CLOUD_PROJECT) process.env.GOOGLE_CLOUD_PROJECT = projectId;
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount), projectId });
     } else {
-      admin.initializeApp();
+      const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+      admin.initializeApp(projectId ? { projectId } : {});
     }
-  } catch (_) {
-    admin.initializeApp();
+  } catch (e) {
+    const projectId = process.env.FIREBASE_PROJECT_ID || process.env.GOOGLE_CLOUD_PROJECT || process.env.GCLOUD_PROJECT;
+    admin.initializeApp(projectId ? { projectId } : {});
   }
   return admin.firestore();
 }
