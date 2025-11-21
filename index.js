@@ -106,7 +106,20 @@ async function punishAndReturn(id, data, mode) {
 
 async function createMatchFromReady(id, data) {
   const times = data.times || { time1: { jogadores: [] }, time2: { jogadores: [] } };
-  await db.collection(HISTORICO_COLLECTION).add({ status: 'pendente', vencedor: 'N/A', time1: times.time1, time2: times.time2, jogadores: data.jogadores || [], createdAt: admin.firestore.FieldValue.serverTimestamp(), readyDocId: id });
+  const time1 = times.time1 || { jogadores: [], pontuacao: 0, nome: 'Time Azul' };
+  const time2 = times.time2 || { jogadores: [], pontuacao: 0, nome: 'Time Vermelho' };
+  const partida = {
+    data: new Date().toISOString(),
+    time1,
+    time2,
+    vencedor: 'N/A',
+    isRandom: false,
+    pontuacaoDiferenca: Math.abs((time1.pontuacao || 0) - (time2.pontuacao || 0)),
+    status: 'Aberta',
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    readyDocId: id
+  };
+  await db.collection(HISTORICO_COLLECTION).add(partida);
 }
 
 async function main() {
