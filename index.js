@@ -121,6 +121,12 @@ async function createMatchFromReady(id, data) {
     readyDocId: id
   };
   await db.collection(HISTORICO_COLLECTION).add(partida);
+  const uids = Array.isArray(data.uids) ? data.uids : (data.jogadores || []).map(p => p.uid).filter(Boolean);
+  await Promise.all(uids.map(async (uid) => {
+    const q = await db.collection(QUEUE_COLLECTION).where('uid','==',uid).get();
+    const dels = q.docs.map(d => db.collection(QUEUE_COLLECTION).doc(d.id).delete());
+    await Promise.all(dels);
+  }));
 }
 
 async function enrichPlayers(players) {
