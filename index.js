@@ -1,5 +1,5 @@
 const { db, admin } = require('./firestore-service');
-const { sortearTimes } = require('./matchmaking-logic');
+const { sortearTimes, assignRolesForTeams } = require('./matchmaking-logic');
 
 const QUEUE_COLLECTION = 'queue';
 const READY_COLLECTION = 'aguardandoPartidas';
@@ -32,11 +32,12 @@ async function createReadyCheckWithFirst10(queuePlayers) {
     const queueDocs = first10.map((p) => db.collection(QUEUE_COLLECTION).doc(p.id));
     const docs = await Promise.all(queueDocs.map((r) => tx.get(r)));
     if (docs.some((d) => !d.exists)) throw new Error('Fila alterada');
-    const players = docs.map((d) => ({ id: d.id, ...d.data() }));
+    let players = docs.map((d) => ({ id: d.id, ...d.data() }));
+    players = await enrichPlayers(players);
     const acc = {};
     players.forEach((p) => { acc[p.uid] = p.source === 'manual' ? 'accepted' : 'pending'; });
     const uids = players.map((p) => p.uid);
-    const times = sortearTimes(players);
+    const times = assignRolesForTeams(sortearTimes(players));
     tx.set(readyRef, {
       status: 'readyCheck',
       timestampFim: new Date(Date.now() + READY_DURATION_MS),
@@ -120,6 +121,34 @@ async function createMatchFromReady(id, data) {
     readyDocId: id
   };
   await db.collection(HISTORICO_COLLECTION).add(partida);
+}
+
+async function enrichPlayers(players) {
+  const usersCol = db.collection('users');
+  const rankingCol = db.collection('ranking');
+  const enriched = await Promise.all(players.map(async (p) => {
+    let u = null;
+    if (p.uid) {
+      const snap = await usersCol.doc(p.uid).get();
+      u = snap.exists ? snap.data() : null;
+    }
+    if (!u && p.nome) {
+      const q = await usersCol.where('nome', '==', p.nome).limit(1).get();
+      u = !q.empty ? q.docs[0].data() : null;
+    }
+    let r = null;
+    if (p.nome) {
+      const rs = await rankingCol.doc(String(p.nome).toLowerCase()).get();
+      r = rs.exists ? rs.data() : null;
+    }
+    const siteElo = u?.siteElo || p.siteElo || p.elo || u?.elo || r?.elo || 'Ferro';
+    const siteDivisao = u?.siteDivisao || p.siteDivisao || p.divisao || u?.divisao || r?.divisao || 'IV';
+    const rolePrincipal = p.rolePrincipal || u?.rolePrincipal || 'Preencher';
+    const roleSecundaria = p.roleSecundaria || u?.roleSecundaria || 'Preencher';
+    const tag = u?.tag || p.tag || '';
+    return { ...p, elo: siteElo, divisao: siteDivisao, rolePrincipal, roleSecundaria, tag };
+  }));
+  return enriched;
 }
 
 async function main() {

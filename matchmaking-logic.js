@@ -32,3 +32,34 @@ function sortearTimes(jogadores) {
 }
 
 module.exports = { calcularPontuacao, sortearTimes };
+function assignRole(jogador, team) {
+  const rolesUsed = new Set(team.map(j => j.roleAtribuida).filter(r => r !== 'Preencher'));
+  const ALL_ROLES = ['Topo', 'Caçador', 'Meio', 'Atirador', 'Suporte'];
+  const availableRoles = ALL_ROLES.filter(role => !rolesUsed.has(role));
+  let roleToAssign = 'Preencher';
+  if (availableRoles.includes(jogador.rolePrincipal)) {
+    roleToAssign = jogador.rolePrincipal;
+  } else if (availableRoles.includes(jogador.roleSecundaria)) {
+    roleToAssign = jogador.roleSecundaria;
+  } else if (availableRoles.length > 0) {
+    roleToAssign = availableRoles[0];
+  }
+  if (rolesUsed.size >= 5 && !rolesUsed.has(roleToAssign)) {
+    roleToAssign = 'Preencher';
+  }
+  jogador.roleAtribuida = roleToAssign;
+  return jogador;
+}
+
+function assignRolesForTeams(times) {
+  const t1 = [];
+  const t2 = [];
+  (times.time1.jogadores || []).forEach(j => { t1.push(assignRole(j, t1)); });
+  (times.time2.jogadores || []).forEach(j => { t2.push(assignRole(j, t2)); });
+  times.time1.jogadores = t1;
+  times.time2.jogadores = t2;
+  return times;
+}
+
+module.exports.assignRole = assignRole;
+module.exports.assignRolesForTeams = assignRolesForTeams;
