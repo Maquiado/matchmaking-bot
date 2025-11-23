@@ -89,18 +89,24 @@ async function maybeResolveReadyDoc(id, data) {
 async function punishAndReturn(id, data, mode) {
   const acc = data.playerAcceptances || {};
   const acceptedUids = Object.keys(acc).filter((uid) => acc[uid] === 'accepted');
-  const penalizeStatuses = mode === 'declined' ? ['declined'] : ['declined', 'pending'];
-  const toPunish = Object.keys(acc).filter((uid) => penalizeStatuses.includes(acc[uid]));
+  const toPunish = Object.keys(acc).filter((uid) => acc[uid] !== 'accepted');
   const banUntil = new Date(Date.now() + 5 * 60 * 1000);
   await Promise.all(
-    toPunish.map((uid) => db.collection('users').doc(uid).update({ matchmakingBanUntil: banUntil, banReason: mode === 'declined' ? 'Recusa de Ready Check' : 'Timeout de Ready Check' }))
+    toPunish.map((uid) => db.collection('users').doc(uid).update({ penaltyUntil: banUntil, matchmakingBanUntil: banUntil, banReason: mode === 'declined' ? 'Recusa de Ready Check' : 'Timeout de Ready Check' }))
+  );
+  await Promise.all(
+    toPunish.map(async (uid) => {
+      const q = await db.collection(QUEUE_COLLECTION).where('uid', '==', uid).get();
+      const dels = q.docs.map((d) => db.collection(QUEUE_COLLECTION).doc(d.id).delete());
+      await Promise.all(dels);
+    })
   );
   const byUid = {}; (data.jogadores || []).forEach((p) => (byUid[p.uid] = p));
   await Promise.all(
-    acceptedUids.map((uid) => {
-      const p = byUid[uid]; if (!p || p.source === 'manual') return Promise.resolve();
+    acceptedUids.map(async (uid) => {
+      const p = byUid[uid]; if (!p || p.source === 'manual') return;
       const payload = { uid: p.uid, nome: p.nome, elo: p.elo, divisao: p.divisao, rolePrincipal: p.rolePrincipal, roleSecundaria: p.roleSecundaria, tag: p.tag || '', source: 'queue', timestamp: admin.firestore.FieldValue.serverTimestamp() };
-      return db.collection(QUEUE_COLLECTION).add(payload);
+      await db.collection(QUEUE_COLLECTION).doc(p.uid).set(payload);
     })
   );
 }
@@ -147,8 +153,8 @@ async function enrichPlayers(players) {
       const rs = await rankingCol.doc(String(p.nome).toLowerCase()).get();
       r = rs.exists ? rs.data() : null;
     }
-    const siteElo = u?.siteElo || p.siteElo || p.elo || u?.elo || r?.elo || 'Ferro';
-    const siteDivisao = u?.siteDivisao || p.siteDivisao || p.divisao || u?.divisao || r?.divisao || 'IV';
+    const siteElo = p.elo || 'Ferro';
+    const siteDivisao = p.divisao || 'IV';
     const rolePrincipal = p.rolePrincipal || u?.rolePrincipal || 'Preencher';
     const roleSecundaria = p.roleSecundaria || u?.roleSecundaria || 'Preencher';
     const tag = u?.tag || p.tag || '';
