@@ -70,12 +70,21 @@ async function maybeResolveReadyDoc(id, data) {
   const acc = data.playerAcceptances || {};
   const vals = Object.values(acc);
   const expired = nowMs() >= endMs;
-  const allAccepted = vals.length === 10 && vals.every((v) => v === 'accepted');
-  const anyDeclined = vals.some((v) => v === 'declined' || v === 'timeout');
-  if (expired || anyDeclined) {
-    const statusFinal = expired ? 'timeout' : 'declined';
-    await db.runTransaction(async (tx) => { tx.update(docRef, { status: statusFinal }); });
-    await punishAndReturn(id, data, statusFinal);
+  const acceptedCount = vals.filter(v => v === 'accepted').length;
+  const declinedCount = vals.filter(v => v === 'declined').length;
+  const pendingCount = vals.filter(v => v === 'pending').length;
+  const allAccepted = vals.length === 10 && acceptedCount === 10;
+  // Apenas resolve por recusa se alguém tiver recusado explicitamente
+  if (declinedCount > 0) {
+    await db.runTransaction(async (tx) => { tx.update(docRef, { status: 'declined' }); });
+    await punishAndReturn(id, data, 'declined');
+    await docRef.delete();
+    return;
+  }
+  // Timeout somente após expirar; enquanto houver pendentes e não expirou, mantém readyCheck
+  if (expired) {
+    await db.runTransaction(async (tx) => { tx.update(docRef, { status: 'timeout' }); });
+    await punishAndReturn(id, data, 'timeout');
     await docRef.delete();
     return;
   }
@@ -89,8 +98,11 @@ async function maybeResolveReadyDoc(id, data) {
 async function punishAndReturn(id, data, mode) {
   const acc = data.playerAcceptances || {};
   const acceptedUids = Object.keys(acc).filter((uid) => acc[uid] === 'accepted');
-  const toPunish = Object.keys(acc).filter((uid) => acc[uid] !== 'accepted');
-  const banUntil = new Date(Date.now() + 5 * 60 * 1000);
+  const pendingUids = Object.keys(acc).filter((uid) => acc[uid] === 'pending');
+  const declinedUids = Object.keys(acc).filter((uid) => acc[uid] === 'declined');
+  const toPunish = mode === 'declined' ? declinedUids : [...pendingUids, ...declinedUids];
+  const reAdd = mode === 'declined' ? [...acceptedUids, ...pendingUids] : acceptedUids;
+  const banUntil = new Date(Date.now() + 30 * 1000);
   await Promise.all(
     toPunish.map((uid) => db.collection('users').doc(uid).update({ penaltyUntil: banUntil, matchmakingBanUntil: banUntil, banReason: mode === 'declined' ? 'Recusa de Ready Check' : 'Timeout de Ready Check' }))
   );
@@ -103,7 +115,7 @@ async function punishAndReturn(id, data, mode) {
   );
   const byUid = {}; (data.jogadores || []).forEach((p) => (byUid[p.uid] = p));
   await Promise.all(
-    acceptedUids.map(async (uid) => {
+    reAdd.map(async (uid) => {
       const p = byUid[uid]; if (!p || p.source === 'manual') return;
       const payload = { uid: p.uid, nome: p.nome, elo: p.elo, divisao: p.divisao, rolePrincipal: p.rolePrincipal, roleSecundaria: p.roleSecundaria, tag: p.tag || '', source: 'queue', timestamp: admin.firestore.FieldValue.serverTimestamp() };
       await db.collection(QUEUE_COLLECTION).doc(p.uid).set(payload);
