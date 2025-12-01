@@ -149,7 +149,6 @@ async function createMatchFromReady(id, data) {
 
 async function enrichPlayers(players) {
   const usersCol = db.collection('users');
-  const rankingCol = db.collection('ranking');
   const enriched = await Promise.all(players.map(async (p) => {
     let u = null;
     if (p.uid) {
@@ -160,17 +159,12 @@ async function enrichPlayers(players) {
       const q = await usersCol.where('nome', '==', p.nome).limit(1).get();
       u = !q.empty ? q.docs[0].data() : null;
     }
-    let r = null;
-    if (p.nome) {
-      const rs = await rankingCol.doc(String(p.nome).toLowerCase()).get();
-      r = rs.exists ? rs.data() : null;
-    }
-    const siteElo = p.elo || 'Ferro';
-    const siteDivisao = p.divisao || 'IV';
+    const elo = p.elo || 'Ferro';
+    const divisao = p.divisao || 'IV';
     const rolePrincipal = p.rolePrincipal || u?.rolePrincipal || 'Preencher';
     const roleSecundaria = p.roleSecundaria || u?.roleSecundaria || 'Preencher';
     const tag = u?.tag || p.tag || '';
-    return { ...p, elo: siteElo, divisao: siteDivisao, rolePrincipal, roleSecundaria, tag };
+    return { ...p, elo, divisao, rolePrincipal, roleSecundaria, tag };
   }));
   return enriched;
 }
