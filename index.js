@@ -39,7 +39,7 @@ async function createReadyCheckWithFirst10(queuePlayers) {
     const uids = players.map((p) => p.uid);
     const times = assignRolesForTeams(sortearTimes(players));
     tx.set(readyRef, {
-      status: 'readyCheck',
+      status: 'pending',
       timestampFim: new Date(Date.now() + READY_DURATION_MS),
       jogadores: players,
       playerAcceptances: acc,
@@ -58,7 +58,7 @@ async function startReadyListener() {
   ref.onSnapshot(async (snap) => {
     const docs = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
     for (const { id, data } of docs) {
-      if (data.status !== 'readyCheck') continue;
+      if (!['pending','readyCheck'].includes(data.status)) continue;
       await maybeResolveReadyDoc(id, data);
     }
   });
@@ -117,8 +117,16 @@ async function punishAndReturn(id, data, mode) {
   await Promise.all(
     reAdd.map(async (uid) => {
       const p = byUid[uid]; if (!p || p.source === 'manual') return;
-      const payload = { uid: p.uid, nome: p.nome, elo: p.elo, divisao: p.divisao, rolePrincipal: p.rolePrincipal, roleSecundaria: p.roleSecundaria, tag: p.tag || '', source: 'queue', timestamp: admin.firestore.FieldValue.serverTimestamp() };
-      await db.collection(QUEUE_COLLECTION).doc(p.uid).set(payload);
+      const usnap = await db.collection('users').doc(uid).get();
+      const ud = usnap.exists ? usnap.data() : {};
+      const nome = (p.nome || ud.nome || ud.playerName || uid);
+      const elo = p.elo || ud.elo || 'Ferro';
+      const divisao = p.divisao || ud.divisao || 'IV';
+      const rolePrincipal = p.rolePrincipal || ud.rolePrincipal || 'Preencher';
+      const roleSecundaria = p.roleSecundaria || ud.roleSecundaria || 'Preencher';
+      const tag = p.tag || ud.tag || '';
+      const payload = { uid, nome, elo, divisao, rolePrincipal, roleSecundaria, tag, source: 'queue', timestamp: admin.firestore.FieldValue.serverTimestamp() };
+      await db.collection(QUEUE_COLLECTION).doc(uid).set(payload);
     })
   );
 }
@@ -149,7 +157,6 @@ async function createMatchFromReady(id, data) {
 
 async function enrichPlayers(players) {
   const usersCol = db.collection('users');
-  const rankingCol = db.collection('ranking');
   const enriched = await Promise.all(players.map(async (p) => {
     let u = null;
     if (p.uid) {
@@ -160,17 +167,13 @@ async function enrichPlayers(players) {
       const q = await usersCol.where('nome', '==', p.nome).limit(1).get();
       u = !q.empty ? q.docs[0].data() : null;
     }
-    let r = null;
-    if (p.nome) {
-      const rs = await rankingCol.doc(String(p.nome).toLowerCase()).get();
-      r = rs.exists ? rs.data() : null;
-    }
-    const siteElo = p.elo || 'Ferro';
-    const siteDivisao = p.divisao || 'IV';
+    const nome = p.nome || (u && (u.nome || u.playerName)) || '';
+    const elo = p.elo || (u && u.elo) || 'Ferro';
+    const divisao = p.divisao || (u && u.divisao) || 'IV';
     const rolePrincipal = p.rolePrincipal || u?.rolePrincipal || 'Preencher';
     const roleSecundaria = p.roleSecundaria || u?.roleSecundaria || 'Preencher';
     const tag = u?.tag || p.tag || '';
-    return { ...p, elo: siteElo, divisao: siteDivisao, rolePrincipal, roleSecundaria, tag };
+    return { ...p, nome, elo, divisao, rolePrincipal, roleSecundaria, tag };
   }));
   return enriched;
 }
