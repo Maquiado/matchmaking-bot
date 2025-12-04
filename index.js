@@ -1,9 +1,9 @@
 const { db, admin } = require('./firestore-service');
 const { sortearTimes, assignRolesForTeams } = require('./matchmaking-logic');
 
-const QUEUE_COLLECTION = 'queue';
+const QUEUE_COLLECTION = 'queuee';
 const READY_COLLECTION = 'aguardandoPartidas';
-const HISTORICO_COLLECTION = 'historicoPartidas';
+const HISTORICO_COLLECTION = 'Historico';
 const READY_DURATION_MS = 30000;
 
 let processingQueue = false;
@@ -118,7 +118,7 @@ async function punishAndReturn(id, data, mode) {
       const rolePrincipal = p.rolePrincipal || ud.rolePrincipal || 'Preencher';
       const roleSecundaria = p.roleSecundaria || ud.roleSecundaria || 'Preencher';
       const tag = p.tag || ud.tag || '';
-      const payload = { uid, nome, elo, divisao, rolePrincipal, roleSecundaria, tag, source: 'queue', timestamp: admin.firestore.FieldValue.serverTimestamp() };
+      const payload = { uid, nome, elo, divisao, rolePrincipal, roleSecundaria, tag, source: 'queuee', timestamp: admin.firestore.FieldValue.serverTimestamp() };
       await db.collection(QUEUE_COLLECTION).doc(uid).set(payload);
     })
   );
