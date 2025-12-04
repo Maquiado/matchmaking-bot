@@ -8,21 +8,15 @@ const READY_DURATION_MS = 30000;
 
 let processingQueue = false;
 
-async function startQueueListener() {
-  const queueRef = db.collection(QUEUE_COLLECTION);
-  queueRef.orderBy('timestamp', 'asc').onSnapshot(async (snap) => {
-    try {
-      const players = [];
-      snap.forEach((d) => players.push({ id: d.id, ...d.data() }));
-      if (players.length >= 10 && !processingQueue) {
-        processingQueue = true;
-        await createReadyCheckWithFirst10(players);
-        processingQueue = false;
-      }
-    } catch (_) {
-      processingQueue = false;
-    }
-  });
+async function checkQueueForMatchmaking() {
+  try {
+    if (processingQueue) return;
+    const qsnap = await db.collection(QUEUE_COLLECTION).orderBy('timestamp', 'asc').limit(10).get();
+    const players = qsnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (players.length < 10) return;
+    processingQueue = true;
+    try { await createReadyCheckWithFirst10(players) } finally { processingQueue = false }
+  } catch {}
 }
 
 async function createReadyCheckWithFirst10(queuePlayers) {
@@ -53,15 +47,14 @@ async function createReadyCheckWithFirst10(queuePlayers) {
 
 function nowMs() { return Date.now(); }
 
-async function startReadyListener() {
-  const ref = db.collection(READY_COLLECTION);
-  ref.onSnapshot(async (snap) => {
-    const docs = snap.docs.map((d) => ({ id: d.id, data: d.data() }));
-    for (const { id, data } of docs) {
-      if (!['pending','readyCheck'].includes(data.status)) continue;
-      await maybeResolveReadyDoc(id, data);
+async function checkPendingReadyChecks() {
+  try {
+    const qsnap = await db.collection(READY_COLLECTION).where('status','in',['pending','readyCheck']).get();
+    for (const d of qsnap.docs) {
+      const data = d.data();
+      await maybeResolveReadyDoc(d.id, data);
     }
-  });
+  } catch {}
 }
 
 async function maybeResolveReadyDoc(id, data) {
@@ -163,10 +156,7 @@ async function enrichPlayers(players) {
       const snap = await usersCol.doc(p.uid).get();
       u = snap.exists ? snap.data() : null;
     }
-    if (!u && p.nome) {
-      const q = await usersCol.where('nome', '==', p.nome).limit(1).get();
-      u = !q.empty ? q.docs[0].data() : null;
-    }
+    
     const nome = p.nome || (u && (u.nome || u.playerName)) || '';
     const elo = p.elo || (u && u.elo) || 'Ferro';
     const divisao = p.divisao || (u && u.divisao) || 'IV';
@@ -179,8 +169,8 @@ async function enrichPlayers(players) {
 }
 
 async function main() {
-  await startQueueListener();
-  await startReadyListener();
+  setInterval(checkQueueForMatchmaking, 5000);
+  setInterval(checkPendingReadyChecks, 5000);
 }
 
 main();
