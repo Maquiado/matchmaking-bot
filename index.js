@@ -1,176 +1,126 @@
-const { db, admin } = require('./firestore-service');
-const { sortearTimes, assignRolesForTeams } = require('./matchmaking-logic');
+const { db, FieldValue, Timestamp } = require('../bots/shared/firebase');
 
-const QUEUE_COLLECTION = 'queuee';
-const READY_COLLECTION = 'aguardandoPartidas';
-const HISTORICO_COLLECTION = 'Historico';
-const READY_DURATION_MS = 30000;
+let unsub = null;
+const timers = new Map();
+const processed = new Set();
 
-let processingQueue = false;
-
-async function checkQueueForMatchmaking() {
-  try {
-    if (processingQueue) return;
-    const qsnap = await db.collection(QUEUE_COLLECTION).orderBy('timestamp', 'asc').limit(10).get();
-    const players = qsnap.docs.map((d) => ({ id: d.id, ...d.data() }));
-    if (players.length < 10) return;
-    processingQueue = true;
-    try { await createReadyCheckWithFirst10(players) } finally { processingQueue = false }
-  } catch {}
+function start() {
+  if (unsub) return;
+  unsub = db.collection('aguardandoPartidas').onSnapshot(
+    (snap) => {
+      snap.docChanges().forEach((chg) => handleChange(chg));
+    },
+    (err) => { console.error('aguardandoPartidas listener error', err); }
+  );
+  setInterval(cleanupOldRooms, 10 * 60 * 1000);
 }
 
-async function createReadyCheckWithFirst10(queuePlayers) {
-  const first10 = queuePlayers.slice(0, 10);
-  const readyRef = db.collection(READY_COLLECTION).doc();
+function handleChange(chg) {
+  const id = chg.doc.id;
+  if (chg.type === 'removed') { clearTimer(id); processed.delete(id); return; }
+  const data = chg.doc.data();
+  scheduleTimeout(id, data);
+  resolveIfComplete(id, data);
+}
+
+function clearTimer(id) {
+  const t = timers.get(id);
+  if (t) { clearTimeout(t); timers.delete(id); }
+}
+
+function scheduleTimeout(id, data) {
+  if (!data || data.status !== 'pending') { clearTimer(id); return; }
+  const ts = data.timestampFim;
+  let endMs = Date.now() + 30000;
+  try { endMs = (typeof ts.toDate === 'function' ? ts.toDate().getTime() : new Date(ts).getTime()); } catch (_) {}
+  const now = Date.now();
+  const delay = Math.max(0, endMs - now);
+  clearTimer(id);
+  const to = setTimeout(async () => { await markTimeout(id); }, delay);
+  timers.set(id, to);
+}
+
+async function markTimeout(id) {
+  const ref = db.collection('aguardandoPartidas').doc(id);
+  await ref.update({ status: 'timeout' });
+}
+
+function resolveIfComplete(id, data) {
+  if (!data || processed.has(id)) return;
+  const acc = data.playerAcceptances || {};
+  const vals = Object.values(acc);
+  if (!vals.length) return;
+  const allAccepted = vals.every((v) => v === 'accepted');
+  const anyDeclined = vals.some((v) => v === 'declined');
+  if (data.status === 'accepted' || allAccepted) { finalizeAccepted(id, data); return; }
+  if (data.status === 'declined' || anyDeclined) { finalizeDeclinedOrTimeout(id, data, 'declined'); return; }
+  if (data.status === 'timeout') { finalizeDeclinedOrTimeout(id, data, 'timeout'); return; }
+}
+
+async function finalizeAccepted(id, data) {
+  if (processed.has(id)) return;
+  processed.add(id);
+  const histRef = db.collection('Historico').doc(id);
+  const docRef = db.collection('aguardandoPartidas').doc(id);
   await db.runTransaction(async (tx) => {
-    const queueDocs = first10.map((p) => db.collection(QUEUE_COLLECTION).doc(p.id));
-    const docs = await Promise.all(queueDocs.map((r) => tx.get(r)));
-    if (docs.some((d) => !d.exists)) throw new Error('Fila alterada');
-    let players = docs.map((d) => ({ id: d.id, ...d.data() }));
-    players = await enrichPlayers(players);
-    const acc = {};
-    players.forEach((p) => { acc[p.uid] = p.source === 'manual' ? 'accepted' : 'pending'; });
-    const uids = players.map((p) => p.uid);
-    const times = assignRolesForTeams(sortearTimes(players));
-    tx.set(readyRef, {
-      status: 'pending',
-      timestampFim: new Date(Date.now() + READY_DURATION_MS),
-      jogadores: players,
-      playerAcceptances: acc,
-      uids,
-      times,
-      createdAt: admin.firestore.FieldValue.serverTimestamp()
-    });
-    queueDocs.forEach((r) => tx.delete(r));
+    const cur = await tx.get(docRef);
+    if (!cur.exists) return;
+    const d = cur.data();
+    const t1 = (d.times && d.times.time1 && d.times.time1.jogadores) || [];
+    const t2 = (d.times && d.times.time2 && d.times.time2.jogadores) || [];
+    const mapJogador = (j) => ({ uid: j.uid || j.id || null, isLider: !!j.isLider, roleAtribuida: j.roleAtribuida || 'Preencher' });
+    const payload = {
+      status: 'pendente',
+      vencedor: 'N/A',
+      random: !!d.random,
+      pontuacaoDiferenca: 0,
+      time1: { jogadores: t1.map(mapJogador) },
+      time2: { jogadores: t2.map(mapJogador) },
+      uids: Array.isArray(d.uids) ? d.uids : [],
+      createdAt: FieldValue.serverTimestamp()
+    };
+    tx.set(histRef, payload);
+    tx.delete(docRef);
   });
 }
 
-function nowMs() { return Date.now(); }
-
-async function checkPendingReadyChecks() {
-  try {
-    const qsnap = await db.collection(READY_COLLECTION).where('status','in',['pending','readyCheck']).get();
-    for (const d of qsnap.docs) {
-      const data = d.data();
-      await maybeResolveReadyDoc(d.id, data);
-    }
-  } catch {}
-}
-
-async function maybeResolveReadyDoc(id, data) {
-  const docRef = db.collection(READY_COLLECTION).doc(id);
-  const endMs = data.timestampFim?.toMillis ? data.timestampFim.toMillis() : new Date(data.timestampFim).getTime();
+async function finalizeDeclinedOrTimeout(id, data, reason) {
+  if (processed.has(id)) return;
+  processed.add(id);
+  const docRef = db.collection('aguardandoPartidas').doc(id);
   const acc = data.playerAcceptances || {};
-  const vals = Object.values(acc);
-  const expired = nowMs() >= endMs;
-  const acceptedCount = vals.filter(v => v === 'accepted').length;
-  const declinedCount = vals.filter(v => v === 'declined').length;
-  const pendingCount = vals.filter(v => v === 'pending').length;
-  const allAccepted = vals.length === 10 && acceptedCount === 10;
-  // Apenas resolve por recusa se alguém tiver recusado explicitamente
-  if (declinedCount > 0) {
-    await db.runTransaction(async (tx) => { tx.update(docRef, { status: 'declined' }); });
-    await punishAndReturn(id, data, 'declined');
-    await docRef.delete();
-    return;
-  }
-  // Timeout somente após expirar; enquanto houver pendentes e não expirou, mantém readyCheck
-  if (expired) {
-    await db.runTransaction(async (tx) => { tx.update(docRef, { status: 'timeout' }); });
-    await punishAndReturn(id, data, 'timeout');
-    await docRef.delete();
-    return;
-  }
-  if (allAccepted) {
-    await db.runTransaction(async (tx) => { tx.update(docRef, { status: 'accepted' }); });
-    await createMatchFromReady(id, data);
-    await docRef.delete();
-  }
-}
-
-async function punishAndReturn(id, data, mode) {
-  const acc = data.playerAcceptances || {};
-  const acceptedUids = Object.keys(acc).filter((uid) => acc[uid] === 'accepted');
-  const pendingUids = Object.keys(acc).filter((uid) => acc[uid] === 'pending');
-  const declinedUids = Object.keys(acc).filter((uid) => acc[uid] === 'declined');
-  const toPunish = mode === 'declined' ? declinedUids : [...pendingUids, ...declinedUids];
-  const reAdd = mode === 'declined' ? [...acceptedUids, ...pendingUids] : acceptedUids;
+  const penalizeStatuses = reason === 'declined' ? ['declined'] : ['declined', 'pending'];
+  const toPunish = Object.keys(acc).filter((u) => penalizeStatuses.includes(acc[u]));
+  const acceptedUids = Object.keys(acc).filter((u) => acc[u] === 'accepted');
+  const byUid = {};
+  (Array.isArray(data.jogadores) ? data.jogadores : []).forEach((p) => { if (p && p.uid) byUid[p.uid] = p; });
   const banUntil = new Date(Date.now() + 30 * 1000);
-  await Promise.all(
-    toPunish.map((uid) => db.collection('users').doc(uid).update({ penaltyUntil: banUntil, matchmakingBanUntil: banUntil, banReason: mode === 'declined' ? 'Recusa de Ready Check' : 'Timeout de Ready Check' }))
-  );
-  await Promise.all(
-    toPunish.map(async (uid) => {
-      const q = await db.collection(QUEUE_COLLECTION).where('uid', '==', uid).get();
-      const dels = q.docs.map((d) => db.collection(QUEUE_COLLECTION).doc(d.id).delete());
-      await Promise.all(dels);
-    })
-  );
-  const byUid = {}; (data.jogadores || []).forEach((p) => (byUid[p.uid] = p));
-  await Promise.all(
-    reAdd.map(async (uid) => {
-      const p = byUid[uid]; if (!p || p.source === 'manual') return;
-      const usnap = await db.collection('users').doc(uid).get();
-      const ud = usnap.exists ? usnap.data() : {};
-      const nome = (p.nome || ud.nome || ud.playerName || uid);
-      const elo = p.elo || ud.elo || 'Ferro';
-      const divisao = p.divisao || ud.divisao || 'IV';
-      const rolePrincipal = p.rolePrincipal || ud.rolePrincipal || 'Preencher';
-      const roleSecundaria = p.roleSecundaria || ud.roleSecundaria || 'Preencher';
-      const tag = p.tag || ud.tag || '';
-      const payload = { uid, nome, elo, divisao, rolePrincipal, roleSecundaria, tag, source: 'queuee', timestamp: admin.firestore.FieldValue.serverTimestamp() };
-      await db.collection(QUEUE_COLLECTION).doc(uid).set(payload);
-    })
-  );
+  const batch = db.batch();
+  toPunish.forEach((u) => {
+    const uref = db.collection('users').doc(u);
+    batch.update(uref, { matchmakingBanUntil: Timestamp.fromDate(banUntil), banReason: reason === 'declined' ? 'Recusa de Ready Check' : 'Timeout de Ready Check' });
+  });
+  acceptedUids.forEach((u) => {
+    const p = byUid[u];
+    if (!p) return;
+    const isManual = p.tipo === 'manual' || p.source === 'manual';
+    if (isManual) return;
+    const qref = db.collection('queue').doc(u);
+    const payload = { uid: p.uid, nome: p.nome || '', elo: p.elo || 'Ferro', divisao: p.divisao || 'IV', rolePrincipal: p.rolePrincipal || 'Preencher', roleSecundaria: p.roleSecundaria || 'Preencher', tag: p.tag || '', source: 'queue', tipo: 'automatica', timestamp: FieldValue.serverTimestamp() };
+    batch.set(qref, payload, { merge: true });
+  });
+  batch.delete(docRef);
+  await batch.commit();
 }
 
-async function createMatchFromReady(id, data) {
-  const times = data.times || { time1: { jogadores: [] }, time2: { jogadores: [] } };
-  const time1 = times.time1 || { jogadores: [], pontuacao: 0, nome: 'Time Azul' };
-  const time2 = times.time2 || { jogadores: [], pontuacao: 0, nome: 'Time Vermelho' };
-  const partida = {
-    data: new Date().toISOString(),
-    time1,
-    time2,
-    vencedor: 'N/A',
-    isRandom: false,
-    pontuacaoDiferenca: Math.abs((time1.pontuacao || 0) - (time2.pontuacao || 0)),
-    status: 'Aberta',
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    readyDocId: id
-  };
-  await db.collection(HISTORICO_COLLECTION).add(partida);
-  const uids = Array.isArray(data.uids) ? data.uids : (data.jogadores || []).map(p => p.uid).filter(Boolean);
-  await Promise.all(uids.map(async (uid) => {
-    const q = await db.collection(QUEUE_COLLECTION).where('uid','==',uid).get();
-    const dels = q.docs.map(d => db.collection(QUEUE_COLLECTION).doc(d.id).delete());
-    await Promise.all(dels);
-  }));
+async function cleanupOldRooms() {
+  const cutoff = Timestamp.fromDate(new Date(Date.now() - 24 * 60 * 60 * 1000));
+  const snap = await db.collection('aguardandoPartidas').where('createdAt', '<', cutoff).limit(50).get();
+  if (snap.empty) return;
+  const batch = db.batch();
+  snap.forEach((d) => batch.delete(d.ref));
+  await batch.commit();
 }
 
-async function enrichPlayers(players) {
-  const usersCol = db.collection('users');
-  const enriched = await Promise.all(players.map(async (p) => {
-    let u = null;
-    if (p.uid) {
-      const snap = await usersCol.doc(p.uid).get();
-      u = snap.exists ? snap.data() : null;
-    }
-    
-    const nome = p.nome || (u && (u.nome || u.playerName)) || '';
-    const elo = p.elo || (u && u.elo) || 'Ferro';
-    const divisao = p.divisao || (u && u.divisao) || 'IV';
-    const rolePrincipal = p.rolePrincipal || u?.rolePrincipal || 'Preencher';
-    const roleSecundaria = p.roleSecundaria || u?.roleSecundaria || 'Preencher';
-    const tag = u?.tag || p.tag || '';
-    return { ...p, nome, elo, divisao, rolePrincipal, roleSecundaria, tag };
-  }));
-  return enriched;
-}
+start();
 
-async function main() {
-  setInterval(checkQueueForMatchmaking, 5000);
-  setInterval(checkPendingReadyChecks, 5000);
-}
-
-main();
