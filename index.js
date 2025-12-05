@@ -1,4 +1,4 @@
-const { db, FieldValue, Timestamp } = require('../bots/shared/firebase');
+const { db, FieldValue, Timestamp } = require('./firebase');
 
 let unsub = null;
 const timers = new Map();
@@ -123,4 +123,3 @@ async function cleanupOldRooms() {
 }
 
 start();
-
